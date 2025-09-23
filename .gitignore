@@ -18,4 +18,4 @@ venv/
 Thumbs.db
 
 # Hardware secrets
-hardware/secrets.h
+hardware/plant_monitor/secrets.h
