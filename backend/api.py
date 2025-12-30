@@ -5,6 +5,19 @@ import sqlite3
 #connect to database 
 app = Flask(__name__)
 #esp32 sends data 
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "Plant Monitor API is running",
+        "endpoints": [
+            "POST /readings",
+            "GET /readings/latest",
+            "GET /readings/history?hours=168",
+            "GET /readings/summary",
+            "GET /status"
+        ]
+    })
 @app.route('/readings', methods=['POST'])
 def save_readings():
     data = request.get_json()
