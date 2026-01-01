@@ -1,5 +1,6 @@
 # setup_database.py
 # Run this ONCE to create your database and table
+# DO NOT USE IN PRODUCTION (Heroku initializes DB in api.py)
 
 import sqlite3
 
