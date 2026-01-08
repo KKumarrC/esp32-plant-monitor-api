@@ -10,17 +10,25 @@ DB_PATH = os.environ.get("DB_PATH", "/tmp/plant_readings.db")
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+
+    # Create table if it doesn't exist (new installs)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
             moisture INTEGER NOT NULL,
             temperature REAL NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Migration for older DBs: add device_id if missing
+    cols = [row["name"] for row in conn.execute("PRAGMA table_info(readings)").fetchall()]
+    if "device_id" not in cols:
+        conn.execute("ALTER TABLE readings ADD COLUMN device_id TEXT NOT NULL DEFAULT 'esp32-1'")
+
     conn.commit()
     return conn
-
 
 @app.route("/", methods=["GET"])
 def home():
@@ -43,6 +51,7 @@ def health():
 @app.route("/readings", methods=["POST"])
 def save_readings():
     data = request.get_json()
+    device_id = data.get("device_id", "esp32-1")
 
     if not data:
         return jsonify({"status": "error", "message": "No data provided"}), 400
@@ -70,10 +79,10 @@ def save_readings():
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO readings (moisture, temperature)
-        VALUES (?, ?)
-    """, (moisture, temperature))
+    cursor.execute('''
+    INSERT INTO readings (device_id, moisture, temperature)
+    VALUES (?, ?, ?)
+    ''', (device_id, moisture, temperature))
     conn.commit()
     conn.close()
 
@@ -92,13 +101,13 @@ def latest_readings():
 
     if reading is None:
         return jsonify({"message": "No readings yet"}), 404
-
     return jsonify({
         "id": reading[0],
-        "moisture": reading[1],
-        "temperature": reading[2],
-        "timestamp": reading[3]
-    })
+        "device_id": reading[1],
+        "moisture": reading[2],
+        "temperature": reading[3],
+        "timestamp": reading[4]
+        })
 
 
 @app.route('/readings/history', methods=['GET'])
@@ -154,31 +163,50 @@ def get_status():
     conn = get_conn()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM readings ORDER BY timestamp DESC LIMIT 1")
+    # Get latest reading + how many seconds ago it was
+    cursor.execute("""
+        SELECT id, device_id, moisture, temperature, timestamp,
+               CAST((strftime('%s','now') - strftime('%s', timestamp)) AS INTEGER) AS seconds_ago
+        FROM readings
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """)
     latest = cursor.fetchone()
 
     if not latest:
         conn.close()
         return jsonify({"message": "No readings yet"}), 404
 
+    # Get moisture from >=24 hours ago (for change calculation)
     cursor.execute("""
         SELECT moisture FROM readings
         WHERE timestamp <= datetime('now','-24 hours')
-        ORDER BY timestamp DESC LIMIT 1
+        ORDER BY timestamp DESC
+        LIMIT 1
     """)
     yesterday = cursor.fetchone()
 
     conn.close()
 
+    # Compute staleness (always)
+    seconds_ago = latest[5]
+    stale = seconds_ago > 600  # 10 minutes
+
+    # Compute moisture change (optional)
     moisture_change = None
     if yesterday:
-        moisture_change = latest[1] - yesterday[0]
+        moisture_change = latest[2] - yesterday[0]
 
     return jsonify({
+        "device": {
+            "device_id": latest[1],
+            "last_seen_seconds_ago": seconds_ago,
+            "stale": stale
+        },
         "current": {
-            "moisture": latest[1],
-            "temperature": latest[2],
-            "timestamp": latest[3]
+            "moisture": latest[2],
+            "temperature": latest[3],
+            "timestamp": latest[4]
         },
         "changes": {
             "moisture_24h": moisture_change
