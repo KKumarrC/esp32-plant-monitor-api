@@ -36,6 +36,9 @@ def home():
         ]
     })
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True}), 200
 
 @app.route("/readings", methods=["POST"])
 def save_readings():
