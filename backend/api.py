@@ -98,36 +98,52 @@ def latest_readings():
     })
 
 
-@app.route("/readings/history", methods=["GET"])
+@app.route('/readings/history', methods=['GET'])
 def reading_history():
     conn = get_conn()
     cursor = conn.cursor()
 
-    hours = request.args.get("hours", 168, type=int)
-    time_string = f"-{hours} hours"
+    # How far back to look (default 168 hours = 7 days)
+    hours = request.args.get('hours', 168, type=int)
+    if hours <= 0:
+        conn.close()
+        return jsonify({"status": "error", "message": "hours must be > 0"}), 400
 
-    cursor.execute("""
+    # Safety cap so the endpoint doesn't grow forever
+    limit = request.args.get('limit', 500, type=int)
+    if limit <= 0 or limit > 5000:
+        conn.close()
+        return jsonify({"status": "error", "message": "limit must be between 1 and 5000"}), 400
+
+    time_string = f'-{hours} hours'
+
+    # Grab the most recent N rows efficiently, then reverse so output is oldest -> newest
+    cursor.execute('''
         SELECT * FROM readings
         WHERE timestamp > datetime('now', ?)
         ORDER BY timestamp DESC
-    """, (time_string,))
-    readings = cursor.fetchall()
-
+        LIMIT ?
+    ''', (time_string, limit))
+    rows = cursor.fetchall()
     conn.close()
 
-    if not readings:
-        return jsonify({"message": "No readings yet"}), 404
+    rows.reverse()  # oldest -> newest
 
-    result = []
-    for reading in readings:
-        result.append({
-            "id": reading[0],
-            "moisture": reading[1],
-            "temperature": reading[2],
-            "timestamp": reading[3]
+    readings = []
+    for r in rows:
+        readings.append({
+            "id": r[0],
+            "moisture": r[1],
+            "temperature": r[2],
+            "timestamp": r[3]
         })
 
-    return jsonify({"readings": result})
+    return jsonify({
+        "hours": hours,
+        "limit": limit,
+        "count": len(readings),
+        "readings": readings
+    })
 
 
 @app.route("/status", methods=["GET"])
