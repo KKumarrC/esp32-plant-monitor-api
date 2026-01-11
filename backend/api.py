@@ -1,17 +1,40 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
-import sqlite3
 import os
+import sqlite3
+import psycopg2
 
 app = Flask(__name__)
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+IS_PG = DATABASE_URL is not None
 DB_PATH = os.environ.get("DB_PATH", "/tmp/plant_readings.db")
 
+
 def get_conn():
+    """
+    Returns a DB connection that is guaranteed to have a `readings` table.
+    - On Heroku (DATABASE_URL set): Postgres
+    - Otherwise: SQLite (file at DB_PATH)
+    """
+    if IS_PG:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS readings (
+                id SERIAL PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                moisture INTEGER NOT NULL,
+                temperature DOUBLE PRECISION NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        conn.commit()
+        cur.close()
+        return conn
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-
-    # Create table if it doesn't exist (new installs)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,14 +44,9 @@ def get_conn():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # Migration for older DBs: add device_id if missing
-    cols = [row["name"] for row in conn.execute("PRAGMA table_info(readings)").fetchall()]
-    if "device_id" not in cols:
-        conn.execute("ALTER TABLE readings ADD COLUMN device_id TEXT NOT NULL DEFAULT 'esp32-1'")
-
     conn.commit()
     return conn
+
 
 @app.route("/", methods=["GET"])
 def home():
@@ -38,23 +56,27 @@ def home():
         "endpoints": [
             "POST /readings",
             "GET /readings/latest",
-            "GET /readings/history?hours=168",
+            "GET /readings/history?hours=168&limit=500",
             "GET /readings/summary",
-            "GET /status"
+            "GET /status",
+            "GET /health"
         ]
     })
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
 
+
 @app.route("/readings", methods=["POST"])
 def save_readings():
     data = request.get_json()
-    device_id = data.get("device_id", "esp32-1")
 
     if not data:
         return jsonify({"status": "error", "message": "No data provided"}), 400
+
+    device_id = data.get("device_id", "esp32-1")
 
     if "moisture" not in data:
         return jsonify({"status": "error", "message": "moisture data is missing"}), 400
@@ -78,11 +100,19 @@ def save_readings():
         return jsonify({"status": "error", "message": "temperature levels are invalid"}), 400
 
     conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT INTO readings (device_id, moisture, temperature)
-    VALUES (?, ?, ?)
-    ''', (device_id, moisture, temperature))
+    cur = conn.cursor()
+
+    if IS_PG:
+        cur.execute("""
+            INSERT INTO readings (device_id, moisture, temperature)
+            VALUES (%s, %s, %s)
+        """, (device_id, moisture, temperature))
+    else:
+        cur.execute("""
+            INSERT INTO readings (device_id, moisture, temperature)
+            VALUES (?, ?, ?)
+        """, (device_id, moisture, temperature))
+
     conn.commit()
     conn.close()
 
@@ -92,63 +122,76 @@ def save_readings():
 @app.route("/readings/latest", methods=["GET"])
 def latest_readings():
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("SELECT * FROM readings ORDER BY timestamp DESC LIMIT 1")
-    reading = cursor.fetchone()
-
+    cur.execute("""
+        SELECT id, device_id, moisture, temperature, timestamp
+        FROM readings
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
     conn.close()
 
-    if reading is None:
+    if not row:
         return jsonify({"message": "No readings yet"}), 404
+
     return jsonify({
-        "id": reading[0],
-        "device_id": reading[1],
-        "moisture": reading[2],
-        "temperature": reading[3],
-        "timestamp": reading[4]
-        })
+        "id": row[0],
+        "device_id": row[1],
+        "moisture": row[2],
+        "temperature": row[3],
+        "timestamp": str(row[4]),
+    })
 
 
-@app.route('/readings/history', methods=['GET'])
+@app.route("/readings/history", methods=["GET"])
 def reading_history():
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    # How far back to look (default 168 hours = 7 days)
-    hours = request.args.get('hours', 168, type=int)
+    hours = request.args.get("hours", 168, type=int)
     if hours <= 0:
         conn.close()
         return jsonify({"status": "error", "message": "hours must be > 0"}), 400
 
-    # Safety cap so the endpoint doesn't grow forever
-    limit = request.args.get('limit', 500, type=int)
+    limit = request.args.get("limit", 500, type=int)
     if limit <= 0 or limit > 5000:
         conn.close()
         return jsonify({"status": "error", "message": "limit must be between 1 and 5000"}), 400
 
-    time_string = f'-{hours} hours'
+    if IS_PG:
+        cur.execute("""
+            SELECT id, device_id, moisture, temperature, timestamp
+            FROM readings
+            WHERE timestamp > NOW() - (%s * INTERVAL '1 hour')
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (hours, limit))
+        rows = cur.fetchall()
+    else:
+        time_string = f"-{hours} hours"
+        cur.execute("""
+            SELECT id, device_id, moisture, temperature, timestamp
+            FROM readings
+            WHERE timestamp > datetime('now', ?)
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (time_string, limit))
+        rows = cur.fetchall()
 
-    # Grab the most recent N rows efficiently, then reverse so output is oldest -> newest
-    cursor.execute('''
-        SELECT * FROM readings
-        WHERE timestamp > datetime('now', ?)
-        ORDER BY timestamp DESC
-        LIMIT ?
-    ''', (time_string, limit))
-    rows = cursor.fetchall()
     conn.close()
 
+    rows = list(rows)
     rows.reverse()  # oldest -> newest
 
-    readings = []
-    for r in rows:
-        readings.append({
-            "id": r[0],
-            "moisture": r[1],
-            "temperature": r[2],
-            "timestamp": r[3]
-        })
+    readings = [{
+        "id": r[0],
+        "device_id": r[1],
+        "moisture": r[2],
+        "temperature": r[3],
+        "timestamp": str(r[4]),
+    } for r in rows]
 
     return jsonify({
         "hours": hours,
@@ -161,38 +204,52 @@ def reading_history():
 @app.route("/status", methods=["GET"])
 def get_status():
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    # Get latest reading + how many seconds ago it was
-    cursor.execute("""
-        SELECT id, device_id, moisture, temperature, timestamp,
-               CAST((strftime('%s','now') - strftime('%s', timestamp)) AS INTEGER) AS seconds_ago
-        FROM readings
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """)
-    latest = cursor.fetchone()
+    if IS_PG:
+        cur.execute("""
+            SELECT id, device_id, moisture, temperature, timestamp,
+                   CAST(EXTRACT(EPOCH FROM (NOW() - timestamp)) AS INTEGER) AS seconds_ago
+            FROM readings
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+    else:
+        cur.execute("""
+            SELECT id, device_id, moisture, temperature, timestamp,
+                   CAST((strftime('%s','now') - strftime('%s', timestamp)) AS INTEGER) AS seconds_ago
+            FROM readings
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+
+    latest = cur.fetchone()
 
     if not latest:
         conn.close()
         return jsonify({"message": "No readings yet"}), 404
 
-    # Get moisture from >=24 hours ago (for change calculation)
-    cursor.execute("""
-        SELECT moisture FROM readings
-        WHERE timestamp <= datetime('now','-24 hours')
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """)
-    yesterday = cursor.fetchone()
+    if IS_PG:
+        cur.execute("""
+            SELECT moisture FROM readings
+            WHERE timestamp <= NOW() - INTERVAL '24 hours'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+    else:
+        cur.execute("""
+            SELECT moisture FROM readings
+            WHERE timestamp <= datetime('now','-24 hours')
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
 
+    yesterday = cur.fetchone()
     conn.close()
 
-    # Compute staleness (always)
     seconds_ago = latest[5]
     stale = seconds_ago > 600  # 10 minutes
 
-    # Compute moisture change (optional)
     moisture_change = None
     if yesterday:
         moisture_change = latest[2] - yesterday[0]
@@ -206,7 +263,7 @@ def get_status():
         "current": {
             "moisture": latest[2],
             "temperature": latest[3],
-            "timestamp": latest[4]
+            "timestamp": str(latest[4])
         },
         "changes": {
             "moisture_24h": moisture_change
@@ -217,10 +274,15 @@ def get_status():
 @app.route("/delete-latest", methods=["POST"])
 def delete_latest_reading():
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("SELECT * FROM readings ORDER BY timestamp DESC LIMIT 1")
-    latest = cursor.fetchone()
+    cur.execute("""
+        SELECT id, device_id, moisture, temperature, timestamp
+        FROM readings
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """)
+    latest = cur.fetchone()
 
     if not latest:
         conn.close()
@@ -228,12 +290,17 @@ def delete_latest_reading():
 
     deleted_data = {
         "id": latest[0],
-        "moisture": latest[1],
-        "temperature": latest[2],
-        "timestamp": latest[3]
+        "device_id": latest[1],
+        "moisture": latest[2],
+        "temperature": latest[3],
+        "timestamp": str(latest[4]),
     }
 
-    cursor.execute("DELETE FROM readings WHERE id = ?", (latest[0],))
+    if IS_PG:
+        cur.execute("DELETE FROM readings WHERE id = %s", (latest[0],))
+    else:
+        cur.execute("DELETE FROM readings WHERE id = ?", (latest[0],))
+
     conn.commit()
     conn.close()
 
@@ -254,10 +321,10 @@ def reset_plant_data():
         }), 400
 
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("SELECT COUNT(*) FROM readings")
-    count = cursor.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM readings")
+    count = cur.fetchone()[0]
 
     if count == 0:
         conn.close()
@@ -267,8 +334,12 @@ def reset_plant_data():
             "deleted_count": 0
         }), 200
 
-    cursor.execute("DELETE FROM readings")
-    cursor.execute("DELETE FROM sqlite_sequence WHERE name='readings'")
+    if IS_PG:
+        cur.execute("TRUNCATE readings RESTART IDENTITY;")
+    else:
+        cur.execute("DELETE FROM readings")
+        cur.execute("DELETE FROM sqlite_sequence WHERE name='readings'")
+
     conn.commit()
     conn.close()
 
@@ -283,38 +354,38 @@ def reset_plant_data():
 @app.route("/readings/summary", methods=["GET"])
 def summary():
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("SELECT COUNT(*) FROM readings")
-    total_count = cursor.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM readings")
+    total_count = cur.fetchone()[0]
 
     if total_count == 0:
         conn.close()
         return jsonify({"message": "No readings yet"}), 404
 
-    cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM readings")
-    first_date, last_date = cursor.fetchone()
+    cur.execute("SELECT MIN(timestamp), MAX(timestamp) FROM readings")
+    first_date, last_date = cur.fetchone()
 
-    cursor.execute("SELECT MIN(moisture), MAX(moisture) FROM readings")
-    min_moisture, max_moisture = cursor.fetchone()
+    cur.execute("SELECT MIN(moisture), MAX(moisture) FROM readings")
+    min_moisture, max_moisture = cur.fetchone()
 
-    cursor.execute("SELECT MIN(temperature), MAX(temperature) FROM readings")
-    min_temperature, max_temperature = cursor.fetchone()
+    cur.execute("SELECT MIN(temperature), MAX(temperature) FROM readings")
+    min_temperature, max_temperature = cur.fetchone()
 
-    cursor.execute("SELECT AVG(moisture), AVG(temperature) FROM readings")
-    avg_moisture, avg_temp = cursor.fetchone()
+    cur.execute("SELECT AVG(moisture), AVG(temperature) FROM readings")
+    avg_moisture, avg_temp = cur.fetchone()
 
     conn.close()
 
-    
-    start = datetime.strptime(first_date, "%Y-%m-%d %H:%M:%S")
-    end = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
+    # These may be datetime objects (Postgres) or strings (SQLite). Convert safely.
+    start = first_date if isinstance(first_date, datetime) else datetime.fromisoformat(str(first_date))
+    end = last_date if isinstance(last_date, datetime) else datetime.fromisoformat(str(last_date))
     days_monitored = (end - start).days
 
     return jsonify({
         "total_readings": total_count,
-        "monitoring_since": first_date,
-        "last_reading": last_date,
+        "monitoring_since": str(first_date),
+        "last_reading": str(last_date),
         "days_monitored": days_monitored,
         "moisture": {
             "min": min_moisture,
