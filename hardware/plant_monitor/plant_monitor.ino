@@ -40,10 +40,10 @@ void loop() {
     Serial.println(API_URL);
 
     WiFiClientSecure client;
-    client.setInsecure(); // skip SSL cert validation (OK for this project)
+    client.setInsecure(); // skip SSL cert validation 
 
     HTTPClient https;
-    https.begin(client, API_URL); // API_URL should be full https://.../readings
+    https.begin(client, API_URL); 
     https.addHeader("Content-Type", "application/json");
     https.setTimeout(8000);
 
