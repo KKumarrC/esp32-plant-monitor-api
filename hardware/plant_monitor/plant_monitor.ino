@@ -49,7 +49,7 @@ void loop() {
 
     String body =
       String("{\"device_id\":\"esp32-1\",\"moisture\":") + moisture +
-      String(",\"temperature\":") + String(tempC, 2) +
+      String(",\"temperature\":") + String(tempC, 2) +  
       String("}");
 
     int code = https.POST(body);
