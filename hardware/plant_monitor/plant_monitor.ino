@@ -30,11 +30,6 @@ void loop() {
   uint16_t moisture = ss.touchRead(0);
   float tempC = ss.getTemp();   // API wants Celsius
 
-  // Optional: debug print in Fahrenheit
-  float tempF = (tempC * 9.0 / 5.0) + 32.0;
-  Serial.print("Moisture: "); Serial.print(moisture);
-  Serial.print("  Temp F: "); Serial.println(tempF, 2);
-
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("Posting to: ");
     Serial.println(API_URL);
