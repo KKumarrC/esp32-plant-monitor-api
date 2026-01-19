@@ -1,7 +1,3 @@
-# setup_database.py
-# Run this ONCE to create your database and table
-# DO NOT USE IN PRODUCTION (Heroku initializes DB in api.py)
-
 import sqlite3
 
 # Connect to database (this creates the file if it doesn't exist)
@@ -24,7 +20,7 @@ conn.commit()
 print("Database created successfully!")
 print("Table 'readings' is ready to store sensor data")
 
-# Let's verify it worked by checking the table structure
+# verify by checking the table structure
 cursor.execute("PRAGMA table_info(readings)")
 columns = cursor.fetchall()
 
