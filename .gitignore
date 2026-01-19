@@ -19,3 +19,4 @@ Thumbs.db
 
 # Hardware secrets
 hardware/plant_monitor/secrets.h
+secrets.h
