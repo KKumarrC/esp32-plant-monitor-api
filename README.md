@@ -1,4 +1,4 @@
-# IoT Plant Monitor (ESP32 + Flask + Postgres + Heroku)
+# ESP32 Plant Monitor API (ESP32 + Flask + Postgres + Heroku)
 
 This IoT-style plant monitoring system collects soil moisture and temperature readings from an ESP32 sensor node and uploads them to a cloud hosted Flask REST API. The API stores readings in a database and provides endpoints for latest values, history, summary stats, and device health/status. I originally used SQLite locally, but moved to Postgres on Heroku so readings persist across restarts.
 
