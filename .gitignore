@@ -16,6 +16,7 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+NUL
 
 # Hardware secrets
 hardware/plant_monitor/secrets.h
