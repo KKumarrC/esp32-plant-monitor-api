@@ -21,3 +21,4 @@ NUL
 # Hardware secrets
 hardware/plant_monitor/secrets.h
 hardware/secrets.h
+secrets.h
